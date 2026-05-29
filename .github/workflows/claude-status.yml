@@ -1,0 +1,44 @@
+name: Claude Status → Discord
+
+on:
+  schedule:
+    # 5分ごと(GitHub の最短間隔)。混雑時は数分遅延・まれにスキップあり。
+    - cron: "*/5 * * * *"
+  workflow_dispatch: {}
+
+# 同時実行を防ぐ(state.json の競合回避)
+concurrency:
+  group: claude-status
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Check Claude status and notify Discord
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: python notify.py
+
+      - name: Commit updated state (only if changed)
+        run: |
+          if [[ -n "$(git status --porcelain state.json)" ]]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add state.json
+            git commit -m "chore: update notified-incident state [skip ci]"
+            git push
+          else
+            echo "state.json に変更なし。コミットしません。"
+          fi
