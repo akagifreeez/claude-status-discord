@@ -1,9 +1,9 @@
 name: Claude Status → Discord
 
 on:
-  schedule:
-    # 5分ごと(GitHub の最短間隔)。混雑時は数分遅延・まれにスキップあり。
-    - cron: "*/5 * * * *"
+  # 定期実行は k8s CronJob (k8s/cronjob.yaml) に移行したため schedule は無効化。
+  # GitHub の cron は間引かれて数時間空くことがあるため、確実な5分間隔は CronJob 側で担保する。
+  # ここでは手動実行(workflow_dispatch)のみ残す。
   workflow_dispatch: {}
 
 # 同時実行を防ぐ(state.json の競合回避)
@@ -29,6 +29,7 @@ jobs:
       - name: Check Claude status and notify Discord
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          DISCORD_FORUM: "1"   # 通知先がフォーラムチャンネルのため
         run: python notify.py
 
       - name: Commit updated state (only if changed)

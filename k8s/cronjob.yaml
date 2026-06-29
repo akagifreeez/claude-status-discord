@@ -62,6 +62,8 @@ spec:
               env:
                 - name: STATE_FILE
                   value: /data/state.json
+                - name: DISCORD_FORUM        # the target Discord channel is a forum channel
+                  value: "1"
                 - name: DISCORD_WEBHOOK_URL
                   valueFrom:
                     secretKeyRef: { name: discord, key: DISCORD_WEBHOOK_URL }

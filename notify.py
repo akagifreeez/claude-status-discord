@@ -7,6 +7,9 @@
 環境変数:
   DISCORD_WEBHOOK_URL  Discord の Webhook URL (必須)
   STATE_FILE           状態ファイルのパス (省略時 state.json)
+  DISCORD_FORUM        フォーラムチャンネル宛なら 1/true を指定。各通知を
+                       「インシデント名」をタイトルにしたフォーラム投稿として送る。
+                       (フォーラムチャンネルの Webhook は thread_name が必須)
 """
 from __future__ import annotations
 
@@ -73,8 +76,13 @@ def save_state(path: str, state: dict) -> None:
         f.write("\n")
 
 
-def post_discord(webhook: str, embed: dict) -> None:
-    payload = json.dumps({"embeds": [embed]}).encode("utf-8")
+def post_discord(webhook: str, embed: dict, thread_name: str | None = None) -> None:
+    body: dict = {"embeds": [embed]}
+    # フォーラムチャンネルの Webhook は thread_name が必須(新規フォーラム投稿になる)。
+    # タイトルは Discord 仕様で最大 100 文字。
+    if thread_name:
+        body["thread_name"] = thread_name[:100]
+    payload = json.dumps(body).encode("utf-8")
     req = urllib.request.Request(
         webhook,
         data=payload,
@@ -121,6 +129,7 @@ def main() -> int:
         return 1
 
     state_file = os.environ.get("STATE_FILE", "state.json")
+    forum = os.environ.get("DISCORD_FORUM", "").strip().lower() in ("1", "true", "yes", "on")
     state = load_state(state_file)
     seen = set(state["seen"])
 
@@ -154,8 +163,10 @@ def main() -> int:
     sent = 0
     for inc, upd in pending:
         embed = build_embed(inc, upd)
+        # フォーラムチャンネルでは各通知をインシデント名タイトルの投稿として送る
+        thread_name = (inc.get("name") or "Claude インシデント") if forum else None
         try:
-            post_discord(webhook, embed)
+            post_discord(webhook, embed, thread_name)
         except urllib.error.HTTPError as e:
             print(f"WARN: Discord 投稿失敗 (HTTP {e.code}): {inc.get('name')}", file=sys.stderr)
             # 失敗分は既読にせず次回再送する
