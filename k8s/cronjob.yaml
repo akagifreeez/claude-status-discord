@@ -1,0 +1,82 @@
+# Run the notifier as a Kubernetes CronJob (every 5 min) instead of GitHub Actions.
+#
+# This manifest holds the Namespace, the state PVC, and the CronJob. Two pieces
+# are created out-of-band so no code or secrets are duplicated here:
+#
+#   # the script, mounted into the pod from a ConfigMap (no image build needed):
+#   kubectl -n claude-status create configmap notify-script --from-file=notify.py
+#
+#   # the Discord webhook, as a Secret (never commit this):
+#   kubectl -n claude-status create secret generic discord \
+#     --from-literal=DISCORD_WEBHOOK_URL='https://discord.com/api/webhooks/...'
+#
+# Then:  kubectl apply -f k8s/cronjob.yaml
+#
+# State lives on the PVC (STATE_FILE=/data/state.json) so it survives between
+# runs — the k8s equivalent of committing state.json back to the repo.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: claude-status
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: state
+  namespace: claude-status
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: local-path   # k3s default; change for other clusters
+  resources:
+    requests:
+      storage: 64Mi
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: claude-status
+  namespace: claude-status
+spec:
+  schedule: "*/5 * * * *"
+  concurrencyPolicy: Forbid          # never overlap runs writing the same state
+  startingDeadlineSeconds: 120
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 120
+      template:
+        spec:
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            fsGroup: 1000              # lets the non-root user write the PVC
+            seccompProfile: { type: RuntimeDefault }
+          containers:
+            - name: notify
+              image: python:3.12-slim  # zero-dependency script → stock image
+              command: ["python", "/app/notify.py"]
+              env:
+                - name: STATE_FILE
+                  value: /data/state.json
+                - name: DISCORD_WEBHOOK_URL
+                  valueFrom:
+                    secretKeyRef: { name: discord, key: DISCORD_WEBHOOK_URL }
+              volumeMounts:
+                - { name: script, mountPath: /app, readOnly: true }
+                - { name: state, mountPath: /data }
+              resources:
+                requests: { cpu: 10m, memory: 32Mi }
+                limits: { cpu: 200m, memory: 128Mi }
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities: { drop: ["ALL"] }
+          volumes:
+            - name: script
+              configMap: { name: notify-script }
+            - name: state
+              persistentVolumeClaim: { claimName: state }
