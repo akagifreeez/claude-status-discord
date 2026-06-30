@@ -63,7 +63,9 @@ spec:
                 - name: STATE_FILE
                   value: /data/state.json
                 - name: DISCORD_FORUM        # the target Discord channel is a forum channel
-                  value: "1"
+                  value: "1"                 # all updates go into ONE forum thread (see below)
+                - name: DISCORD_FORUM_THREAD_NAME  # title of that single thread (optional; default "Claude Status")
+                  value: "Claude Status"
                 - name: DISCORD_WEBHOOK_URL
                   valueFrom:
                     secretKeyRef: { name: discord, key: DISCORD_WEBHOOK_URL }

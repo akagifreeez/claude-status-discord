@@ -5,11 +5,15 @@
 依存: なし(Python 標準ライブラリのみ)
 
 環境変数:
-  DISCORD_WEBHOOK_URL  Discord の Webhook URL (必須)
-  STATE_FILE           状態ファイルのパス (省略時 state.json)
-  DISCORD_FORUM        フォーラムチャンネル宛なら 1/true を指定。各通知を
-                       「インシデント名」をタイトルにしたフォーラム投稿として送る。
-                       (フォーラムチャンネルの Webhook は thread_name が必須)
+  DISCORD_WEBHOOK_URL       Discord の Webhook URL (必須)
+  STATE_FILE                状態ファイルのパス (省略時 state.json)
+  DISCORD_FORUM             フォーラムチャンネル宛なら 1/true を指定。すべての
+                            通知を「単一のフォーラム投稿(スレッド)」にまとめて
+                            送る。初回に 1 つだけスレッドを作成し、以降の更新は
+                            その同じスレッドへ追記していく(state に thread_id を
+                            保存して再利用)。
+  DISCORD_FORUM_THREAD_NAME まとめ先スレッドのタイトル (省略時 "Claude Status")。
+                            フォーラム作成時のみ使用。
 """
 from __future__ import annotations
 
@@ -76,22 +80,55 @@ def save_state(path: str, state: dict) -> None:
         f.write("\n")
 
 
-def post_discord(webhook: str, embed: dict, thread_name: str | None = None) -> None:
+def _with_query(url: str, key: str, value: str) -> str:
+    sep = "&" if "?" in url else "?"
+    return f"{url}{sep}{key}={value}"
+
+
+def post_discord(
+    webhook: str,
+    embed: dict,
+    *,
+    thread_name: str | None = None,
+    thread_id: str | None = None,
+) -> str | None:
+    """Discord に embed を 1 件投稿する。
+
+    - thread_id 指定: 既存スレッド(フォーラム投稿)へ追記する。
+    - thread_name 指定(thread_id なし): フォーラムに新規スレッドを作成する。
+      wait=true を付け、応答からスレッド ID を取り出して戻り値で返す。
+    - どちらも無し: 通常チャンネルへの投稿。
+
+    新規スレッドを作成したときだけ、その thread_id を返す(それ以外は None)。
+    """
     body: dict = {"embeds": [embed]}
-    # フォーラムチャンネルの Webhook は thread_name が必須(新規フォーラム投稿になる)。
-    # タイトルは Discord 仕様で最大 100 文字。
-    if thread_name:
+    url = webhook
+    if thread_id:
+        # 既存スレッドへ追記する場合は thread_id をクエリで指定(thread_name は付けない)。
+        url = _with_query(url, "thread_id", thread_id)
+    elif thread_name:
+        # フォーラムチャンネルの Webhook は thread_name で新規投稿になる。
+        # タイトルは Discord 仕様で最大 100 文字。wait=true で作成スレッド情報を受け取る。
         body["thread_name"] = thread_name[:100]
+        url = _with_query(url, "wait", "true")
     payload = json.dumps(body).encode("utf-8")
     req = urllib.request.Request(
-        webhook,
+        url,
         data=payload,
         headers={"Content-Type": "application/json", "User-Agent": USER_AGENT},
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=30) as resp:
         # 2xx 以外は urlopen が例外を投げる
-        resp.read()
+        raw = resp.read()
+    # 新規フォーラムスレッド作成時、応答メッセージの channel_id が新スレッド ID。
+    if thread_name and not thread_id:
+        try:
+            msg = json.loads(raw.decode("utf-8"))
+            return msg.get("channel_id")
+        except (ValueError, AttributeError):
+            return None
+    return None
 
 
 def build_embed(incident: dict, update: dict) -> dict:
@@ -160,13 +197,46 @@ def main() -> int:
         print(f"初回実行: 既存の {len(pending)} 件をベースラインとして既読化(通知なし)。")
         return 0
 
+    # フォーラム宛は「単一スレッド」に全更新をまとめる。初回だけスレッドを作成し、
+    # その thread_id を state に保存して以降は同じスレッドへ追記する。
+    forum_thread_id = state.get("forum_thread_id")
+    forum_thread_name = (
+        os.environ.get("DISCORD_FORUM_THREAD_NAME", "").strip() or "Claude Status"
+    )
+
     sent = 0
     for inc, upd in pending:
         embed = build_embed(inc, upd)
-        # フォーラムチャンネルでは各通知をインシデント名タイトルの投稿として送る
-        thread_name = (inc.get("name") or "Claude インシデント") if forum else None
         try:
-            post_discord(webhook, embed, thread_name)
+            if forum:
+                if forum_thread_id:
+                    # 既存の単一スレッドへ追記。スレッドが消えていれば作り直す。
+                    try:
+                        post_discord(webhook, embed, thread_id=forum_thread_id)
+                    except urllib.error.HTTPError as e:
+                        if e.code == 404:
+                            print(
+                                "WARN: まとめ先スレッドが見つからない(404)。作り直します。",
+                                file=sys.stderr,
+                            )
+                            forum_thread_id = None
+                            state.pop("forum_thread_id", None)
+                        else:
+                            raise
+                if not forum_thread_id:
+                    # 単一スレッドを作成し、その ID を保存して以降の追記に使う。
+                    new_id = post_discord(webhook, embed, thread_name=forum_thread_name)
+                    if not new_id:
+                        # ID を取れないと次回また作ってしまうので既読化せず再試行させる。
+                        print(
+                            "WARN: スレッド作成の応答からIDを取得できませんでした。",
+                            file=sys.stderr,
+                        )
+                        continue
+                    forum_thread_id = new_id
+                    state["forum_thread_id"] = new_id
+            else:
+                post_discord(webhook, embed)
         except urllib.error.HTTPError as e:
             print(f"WARN: Discord 投稿失敗 (HTTP {e.code}): {inc.get('name')}", file=sys.stderr)
             # 失敗分は既読にせず次回再送する
